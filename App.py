@@ -7,7 +7,7 @@ st.set_page_config(page_title="Promo Fraud Detector", layout="wide")
 st.title("📊 Fraud Detection Dashboard – Promo Code Abuse")
 
 # Webhook URL ที่เชื่อมกับ n8n
-webhook_url = "https://n8n.madt.pro/webhook/d07b6b27-ec85-4432-a7dd-9f838914d89e"
+webhook_url = "https://n8n.madt.pro/webhook-test/d07b6b27-ec85-4432-a7dd-9f838914d89e"
 
 # ปุ่มเพื่อโหลดข้อมูล
 if st.button("🔍 Run Fraud Analysis"):
