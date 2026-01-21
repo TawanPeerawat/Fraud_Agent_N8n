@@ -3,16 +3,19 @@
 - Source: tlekdw_fraud.fraudcaseresult
 - Branch master: tlekdw_common.dim_branch
 - Streamlit Cloud friendly (Python 3.13): SQLAlchemy + psycopg3
+- Robust: extract branch_id in pandas, then merge with dim_branch
 """
 
-import streamlit as st
+import re
+import time
+from datetime import datetime
+from urllib.parse import quote_plus
+
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
-import time
-
+import streamlit as st
 from sqlalchemy import create_engine, text
-from urllib.parse import quote_plus
+
 
 # =========================
 # Page config
@@ -81,16 +84,37 @@ with st.sidebar:
 st.markdown('<div class="main-header">🛡️ Fraud Detection Dashboard</div>', unsafe_allow_html=True)
 
 # =========================
-# Engine (SQLAlchemy + psycopg3)
+# Engine
 # =========================
 def get_engine():
-    # กัน password มีอักขระพิเศษ
     pw = quote_plus(db_password)
     url = f"postgresql+psycopg://{db_user}:{pw}@{db_host}:{int(db_port)}/{db_name}"
     return create_engine(url, pool_pre_ping=True)
 
 # =========================
-# Load fraud + branch data
+# Helpers
+# =========================
+def extract_branch_id(branch_text: str):
+    """
+    fraud table Branch looks like: '... (B0042)'
+    """
+    if branch_text is None:
+        return None
+    m = re.search(r"\((B\d+)\)", str(branch_text))
+    return m.group(1) if m else None
+
+def compute_severity(df: pd.DataFrame) -> pd.DataFrame:
+    if "Reason Fraud" in df.columns:
+        r = df["Reason Fraud"].astype(str)
+        df["severity"] = "LOW"
+        df.loc[r.str.contains("CLOSE|KEEP", case=False, na=False), "severity"] = "HIGH"
+        df.loc[r.str.contains("suspected", case=False, na=False), "severity"] = "MEDIUM"
+    else:
+        df["severity"] = "LOW"
+    return df
+
+# =========================
+# Load data (robust)
 # =========================
 @st.cache_data(ttl=30)
 def load_fraud_data(time_range: str, fraud_types: tuple):
@@ -107,41 +131,63 @@ def load_fraud_data(time_range: str, fraud_types: tuple):
     fraud_filter = ""
     params = {}
 
-    # ทำ filter แบบปลอดภัย (ไม่ต่อ string)
+    # safe filter (psycopg3 + sqlalchemy)
     if fraud_types and "All" not in fraud_types:
         fraud_filter = " AND f.fraudtype = ANY(:fraud_list) "
         params["fraud_list"] = list(fraud_types)
 
-    sql = f"""
+    # 1) Load fraud only (no regex / no join)
+    sql_fraud = f"""
     SELECT
-        f.*,
-        substring(f."Branch" from E'\\((B[0-9]+)\\)') AS branch_id,
-        b.branch_name,
-        b.province,
-        b.latitude,
-        b.longitude
+        f.*
     FROM tlekdw_fraud.fraudcaseresult f
-    LEFT JOIN tlekdw_common.dim_branch b
-      ON substring(f."Branch" from E'\\((B[0-9]+)\\)') = b.branch_id
     WHERE {time_filter}
     {fraud_filter}
-    ORDER BY f."timeInvestigation" DESC
+    ORDER BY f.\"timeInvestigation\" DESC
     LIMIT 2000;
     """
 
     with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn, params=params)
+        fraud_df = pd.read_sql(text(sql_fraud), conn, params=params)
 
-    # Severity
-    if "Reason Fraud" in df.columns:
-        reason = df["Reason Fraud"].astype(str)
-        df["severity"] = "LOW"
-        df.loc[reason.str.contains("CLOSE|KEEP", case=False, na=False), "severity"] = "HIGH"
-        df.loc[reason.str.contains("suspected", case=False, na=False), "severity"] = "MEDIUM"
+    if fraud_df.empty:
+        return fraud_df
+
+    # 2) Extract branch_id in pandas
+    if "Branch" in fraud_df.columns:
+        fraud_df["branch_id"] = fraud_df["Branch"].apply(extract_branch_id)
     else:
-        df["severity"] = "LOW"
+        fraud_df["branch_id"] = None
 
-    return df
+    # 3) Pull dim_branch for only involved branch_id
+    branch_ids = fraud_df["branch_id"].dropna().astype(str).unique().tolist()
+
+    if branch_ids:
+        sql_branch = """
+        SELECT
+            branch_id,
+            branch_name,
+            province,
+            latitude,
+            longitude
+        FROM tlekdw_common.dim_branch
+        WHERE branch_id = ANY(:branch_ids);
+        """
+        with engine.connect() as conn:
+            branch_df = pd.read_sql(text(sql_branch), conn, params={"branch_ids": branch_ids})
+
+        # 4) Merge
+        out = fraud_df.merge(branch_df, on="branch_id", how="left")
+    else:
+        # no ids extracted => still return fraud_df
+        out = fraud_df.copy()
+        out["branch_name"] = None
+        out["province"] = None
+        out["latitude"] = None
+        out["longitude"] = None
+
+    out = compute_severity(out)
+    return out
 
 # =========================
 # Load
@@ -163,18 +209,18 @@ with c1:
     st.metric("🚨 Total Cases", len(df))
 
 with c2:
-    high_risk = int((df["severity"] == "HIGH").sum()) if "severity" in df.columns else 0
-    st.metric("⚠️ High Risk", high_risk)
+    st.metric("⚠️ High Risk", int((df["severity"] == "HIGH").sum()))
 
 with c3:
     if "timeInvestigation" in df.columns:
-        today = int((pd.to_datetime(df["timeInvestigation"], errors="coerce").dt.date == datetime.now().date()).sum())
+        t = pd.to_datetime(df["timeInvestigation"], errors="coerce")
+        today = int((t.dt.date == datetime.now().date()).sum())
     else:
         today = 0
     st.metric("📅 Today", today)
 
 with c4:
-    st.metric("🏪 Affected Branches", int(df["branch_id"].nunique()) if "branch_id" in df.columns else 0)
+    st.metric("🏪 Affected Branches", int(df["branch_id"].nunique()))
 
 st.divider()
 
@@ -186,13 +232,21 @@ st.subheader("🗺️ Fraud Map (click point to drill down)")
 map_df = df.dropna(subset=["latitude", "longitude"]).copy()
 
 if map_df.empty:
-    st.warning("⚠️ ไม่มีพิกัด (latitude/longitude) จาก dim_branch — ตรวจว่า join ติดหรือไม่")
+    st.warning("⚠️ ไม่เจอ latitude/longitude หลัง merge dim_branch (เช็คว่า dim_branch มีพิกัดครบไหม)")
+    st.dataframe(df[["Branch", "branch_id", "branch_name", "province"]].head(50), use_container_width=True)
 else:
+    # ensure numeric for size
+    if "fraudamount" in map_df.columns:
+        map_df["fraudamount_num"] = pd.to_numeric(map_df["fraudamount"], errors="coerce").fillna(0)
+        size_col = "fraudamount_num"
+    else:
+        size_col = None
+
     fig_map = px.scatter_mapbox(
         map_df,
         lat="latitude",
         lon="longitude",
-        size="fraudamount" if "fraudamount" in map_df.columns else None,
+        size=size_col,
         color="fraudtype" if "fraudtype" in map_df.columns else None,
         hover_name="branch_name" if "branch_name" in map_df.columns else None,
         hover_data=[c for c in ["Branch", "branch_id", "fraudtype", "severity", "fraudamount", "timeInvestigation"] if c in map_df.columns],
@@ -202,7 +256,6 @@ else:
     fig_map.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
 
     selection = st.plotly_chart(fig_map, use_container_width=True, on_select="rerun")
-
     st.divider()
 
     # =========================
@@ -213,17 +266,12 @@ else:
     if selection and selection.get("selection") and selection["selection"].get("points"):
         idx = selection["selection"]["points"][0]["pointIndex"]
         picked = map_df.iloc[idx]
-
         picked_branch_id = picked.get("branch_id", None)
         picked_branch_name = picked.get("branch_name", "")
 
         st.info(f"Branch: {picked_branch_name} ({picked_branch_id})")
 
-        if picked_branch_id is not None and "branch_id" in df.columns:
-            sub = df[df["branch_id"] == picked_branch_id].copy()
-        else:
-            sub = df.copy()
-
+        sub = df[df["branch_id"] == picked_branch_id].copy() if picked_branch_id else df.copy()
         st.dataframe(sub.head(300), use_container_width=True)
     else:
         st.info("👉 Click a branch on the map to drill down")
@@ -257,14 +305,12 @@ st.divider()
 # Recent cases
 # =========================
 st.subheader("📋 Recent Fraud Cases")
-
 show_cols = [
     "No", "branch_id", "branch_name", "province",
     "fraudtype", "fraudamount", "severity",
     "Reason Fraud", "timeInvestigation"
 ]
 show_cols = [c for c in show_cols if c in df.columns]
-
 st.dataframe(df[show_cols].head(200), use_container_width=True)
 
 # =========================
