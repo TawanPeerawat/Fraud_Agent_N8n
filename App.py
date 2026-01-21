@@ -56,9 +56,9 @@ with st.sidebar:
     st.subheader("📊 Database")
     db_host = st.text_input("Host", value="n8n.madt.pro")
     db_port = st.text_input("Port", value="5432")
-    db_name = st.text_input("Database", value="tlex_suki_db")
-    db_user = st.text_input("Username", value="alex888")
-    db_password = st.text_input("Password", type="password", value="pass is2025")
+    db_name = st.text_input("Database", value="user7_db")
+    db_user = st.text_input("Username", value="bu7_user")
+    db_password = st.text_input("Password", type="password", value=")4+vroymo(u47wO$6tNo")
     
     st.divider()
     
