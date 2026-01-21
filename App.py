@@ -159,22 +159,33 @@ def load_fraud_data(time_range: str, fraud_types: tuple):
     else:
         fraud_df["branch_id"] = None
 
-    # 3) Pull dim_branch for only involved branch_id
+           # 3) Pull dim_branch for only involved branch_id
     branch_ids = fraud_df["branch_id"].dropna().astype(str).unique().tolist()
 
     if branch_ids:
-        sql_branch = """
-        SELECT
-            branch_id,
-            branch_name,
-            province,
-            latitude,
-            longitude
-        FROM tlekdw_common.dim_branch
-        WHERE branch_id = ANY(:branch_ids);
-        """
+        # ✅ IN (...) แบบ expanding (รองรับ list แน่นอนใน psycopg3)
+        sql_branch = text("""
+            SELECT
+                branch_id,
+                branch_name,
+                province,
+                latitude,
+                longitude
+            FROM tlekdw_common.dim_branch
+            WHERE branch_id IN :branch_ids
+        """).bindparams(bindparam("branch_ids", expanding=True))
+
         with engine.connect() as conn:
-            branch_df = pd.read_sql(text(sql_branch), conn, params={"branch_ids": branch_ids})
+            branch_df = pd.read_sql(sql_branch, conn, params={"branch_ids": branch_ids})
+
+        out = fraud_df.merge(branch_df, on="branch_id", how="left")
+    else:
+        out = fraud_df.copy()
+        out["branch_name"] = None
+        out["province"] = None
+        out["latitude"] = None
+        out["longitude"] = None
+
 
         # 4) Merge
         out = fraud_df.merge(branch_df, on="branch_id", how="left")
