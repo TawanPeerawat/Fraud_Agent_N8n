@@ -1,7 +1,6 @@
 """
 🛡️ T-Lex Fraud Monitoring Dashboard
-8 Fraud Types: Internal (5) + External (3)
-Full Charts + Map + Taxonomy
+Auto-mapping old fraud types → 8 new types
 """
 
 import re
@@ -25,31 +24,36 @@ FRAUD_TAXONOMY = {
             'name': 'Employee Transaction Manipulation',
             'name_th': 'พนักงานแทรกแซงธุรกรรม',
             'color': '#EF4444',
-            'icon': '🔴'
+            'icon': '🔴',
+            'keywords': ['void', 'discount', 'undercharg', 'manipulation', 'pos', 'sweetheart']
         },
         'customer_staff_collusion': {
             'name': 'Employee–Customer Collusion',
             'name_th': 'พนักงานสมรู้ร่วมคิดกับลูกค้า',
             'color': '#F59E0B',
-            'icon': '🟠'
+            'icon': '🟠',
+            'keywords': ['collusion', 'staff', 'server', 'employee', 'customer', 'disc']
         },
         'inventory_fraud': {
             'name': 'Inventory Fraud / Shrinkage',
             'name_th': 'ต้นทุน-สต็อกผิดปกติ',
             'color': '#8B5CF6',
-            'icon': '🟣'
+            'icon': '🟣',
+            'keywords': ['inventory', 'cost', 'waste', 'stock', 'shrinkage', 'theft']
         },
         'branch_risk_exposure': {
             'name': 'Branch Financial Manipulation',
             'name_th': 'การบิดเบือนตัวเลขการเงิน',
             'color': '#EC4899',
-            'icon': '🟢'
+            'icon': '🟢',
+            'keywords': ['branch', 'risk', 'exposure', 'ebitda', 'margin', 'financial', 'close', 'keep']
         },
         'branch_operational_risk': {
             'name': 'Operational / Productivity Fraud',
             'name_th': 'ประสิทธิภาพสาขาผิดปกติ',
             'color': '#06B6D4',
-            'icon': '🔵'
+            'icon': '🔵',
+            'keywords': ['operational', 'productivity', 'operation', 'ghost', 'time', 'turnover']
         }
     },
     'EXTERNAL': {
@@ -57,29 +61,87 @@ FRAUD_TAXONOMY = {
             'name': 'Promotion Abuse',
             'name_th': 'การโกงแคมเปญ/ส่วนลด',
             'color': '#10B981',
-            'icon': '🟡'
+            'icon': '🟡',
+            'keywords': ['promo', 'promotion', 'coupon', 'campaign', 'abuse', 'incentive']
         },
         'late_night_high_spend': {
             'name': 'External Transaction Fraud',
             'name_th': 'พฤติกรรมธุรกรรมผิดธรรมชาติ',
             'color': '#3B82F6',
-            'icon': '🔷'
+            'icon': '🔷',
+            'keywords': ['late', 'night', 'high', 'spend', 'amount', 'meal', 'transaction']
         },
         'queue_low_value_anomaly': {
             'name': 'External Complaint Fraud',
             'name_th': 'ใช้ระบบร้องเรียนเพื่อเอาผลประโยชน์',
             'color': '#6366F1',
-            'icon': '🔶'
+            'icon': '🔶',
+            'keywords': ['queue', 'wait', 'low', 'value', 'anomaly', 'complaint', 'takeaway']
         }
     }
 }
 
+# Flatten
 FRAUD_COLORS = {}
 FRAUD_NAMES = {}
+FRAUD_KEYWORDS = {}
 for category in FRAUD_TAXONOMY.values():
     for key, info in category.items():
         FRAUD_COLORS[key] = info['color']
         FRAUD_NAMES[key] = info['name']
+        FRAUD_KEYWORDS[key] = info.get('keywords', [])
+
+# =========================
+# Fraud Type Mapper
+# =========================
+def map_fraud_type(original_type, reason_fraud=''):
+    """
+    Auto-map old fraud type to new 8 types
+    Priority: exact match → keyword match → default
+    """
+    if pd.isna(original_type):
+        return 'branch_risk_exposure'  # default
+    
+    original_lower = str(original_type).lower()
+    reason_lower = str(reason_fraud).lower()
+    combined = f"{original_lower} {reason_lower}"
+    
+    # Exact match first
+    if original_lower in FRAUD_NAMES or original_lower in FRAUD_COLORS:
+        return original_lower
+    
+    # Keyword matching
+    scores = {}
+    for fraud_key, keywords in FRAUD_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in combined)
+        if score > 0:
+            scores[fraud_key] = score
+    
+    if scores:
+        return max(scores, key=scores.get)
+    
+    # Default mappings for common old types
+    mappings = {
+        'collusion': 'customer_staff_collusion',
+        'staff': 'customer_staff_collusion',
+        'customer': 'late_night_high_spend',
+        'transaction': 'late_night_high_spend',
+        'branch': 'branch_risk_exposure',
+        'risk': 'branch_risk_exposure',
+        'inventory': 'inventory_fraud',
+        'operational': 'branch_operational_risk',
+        'promotion': 'promotion_abuse',
+        'queue': 'queue_low_value_anomaly',
+        'wait': 'queue_low_value_anomaly',
+        'night': 'late_night_high_spend',
+        'high_spend': 'late_night_high_spend'
+    }
+    
+    for key, mapped in mappings.items():
+        if key in combined:
+            return mapped
+    
+    return 'branch_risk_exposure'  # ultimate fallback
 
 # Page Config
 st.set_page_config(
@@ -258,17 +320,14 @@ def load_fraud_data(time_range, fraud_types, severity_filter, host, port, db, us
     }
     time_filter = time_filters.get(time_range, "1=1")
     
-    fraud_filter = ""
-    if fraud_types:
-        fraud_list = "(" + ",".join(f"'{ft}'" for ft in fraud_types) + ")"
-        fraud_filter = f" AND fraudtype IN {fraud_list}"
+    # Note: ไม่ใช้ fraud_filter ที่นี่เพราะต้อง map ก่อน
     
     sql = text(f"""
         SELECT 
             "No", "Fraudcases_count", "Branch", "zone_name", "Reason Fraud",
             fraudtype, "timeInvestigation", fraudamount, "Fraudster"
         FROM tlekdw_fraud.fraudcaseresult
-        WHERE {time_filter} {fraud_filter}
+        WHERE {time_filter}
         ORDER BY "timeInvestigation" DESC
         LIMIT 10000
     """)
@@ -279,8 +338,19 @@ def load_fraud_data(time_range, fraud_types, severity_filter, host, port, db, us
     if df.empty:
         return df
     
+    # Store original fraud type
+    df['fraudtype_original'] = df['fraudtype']
+    
+    # Map to new 8 types
+    df['fraudtype'] = df.apply(
+        lambda row: map_fraud_type(row['fraudtype'], row.get('Reason Fraud', '')),
+        axis=1
+    )
+    
+    # Extract branch_id
     df['branch_id'] = df['Branch'].apply(extract_branch_id)
     
+    # Parse Reason Fraud
     parsed_data = df['Reason Fraud'].apply(parse_reason_fraud)
     parsed_df = pd.DataFrame(parsed_data.tolist())
     df = pd.concat([df, parsed_df], axis=1)
@@ -289,6 +359,10 @@ def load_fraud_data(time_range, fraud_types, severity_filter, host, port, db, us
     if 'risk_score' in df.columns:
         df.loc[df['risk_score'] >= 50, 'severity'] = 'HIGH'
         df.loc[(df['risk_score'] >= 30) & (df['risk_score'] < 50), 'severity'] = 'MEDIUM'
+    
+    # Apply filters AFTER mapping
+    if fraud_types:
+        df = df[df['fraudtype'].isin(fraud_types)]
     
     if severity_filter:
         df = df[df['severity'].isin(severity_filter)]
@@ -329,6 +403,14 @@ with st.spinner("🔍 Loading fraud data..."):
 if df.empty:
     st.warning("⚠️ No fraud data found")
     st.stop()
+
+# Show mapping info
+with st.expander("ℹ️ Fraud Type Mapping Info"):
+    if 'fraudtype_original' in df.columns:
+        mapping_df = df.groupby(['fraudtype_original', 'fraudtype']).size().reset_index(name='count')
+        mapping_df = mapping_df.sort_values('count', ascending=False)
+        st.write("### Original → New Type Mapping")
+        st.dataframe(mapping_df, use_container_width=True)
 
 # KPI Cards
 st.subheader("📊 Key Metrics")
@@ -586,7 +668,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 with tab1:
     st.write("### All Fraud Cases")
-    show_cols = ['No', 'timeInvestigation', 'Branch', 'zone_name', 'province', 'fraudtype', 'fraudamount', 'severity', 'Fraudster']
+    show_cols = ['No', 'timeInvestigation', 'Branch', 'zone_name', 'province', 'fraudtype', 'fraudtype_original', 'fraudamount', 'severity', 'Fraudster']
     for col in ['risk_score', 'ebitda', 'server', 'tx_id', 'customer_key']:
         if col in df.columns:
             show_cols.append(col)
