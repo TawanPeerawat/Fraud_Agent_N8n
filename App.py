@@ -3,7 +3,7 @@
 - Source: tlekdw_fraud.fraudcaseresult
 - Branch master: tlekdw_common.dim_branch
 - Streamlit Cloud friendly (Python 3.13): SQLAlchemy + psycopg3
-- Robust: extract branch_id in pandas, then merge with dim_branch
+- Fixed: bindparam expanding issue
 """
 
 import re
@@ -14,7 +14,7 @@ from urllib.parse import quote_plus
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import create_engine, text
 
 
 # =========================
@@ -53,9 +53,9 @@ with st.sidebar:
     st.subheader("📊 Database")
     db_host = st.text_input("Host", value="n8n.madt.pro")
     db_port = st.text_input("Port", value="5432")
-    db_name = st.text_input("Database", value="tlex_suki_db")
+    db_name = st.text_input("Database", value="user7_db")
     db_user = st.text_input("Username", value="alex888")
-    db_password = st.text_input("Password", type="password", value="is2025")
+    db_password = st.text_input("Password", type="password", value="pass is2025")
 
     st.divider()
 
@@ -69,7 +69,7 @@ with st.sidebar:
     fraud_types = st.multiselect(
         "Fraud Types",
         [
-            "inventory_fraud",
+            "branch_risk_exposure",
             "customer_staff_collusion",
             "late_night_high_spend",
             "queue_low_value_anomaly",
@@ -108,7 +108,7 @@ def get_engine(host: str, port: str, db: str, user: str, password: str):
 # Helpers
 # =========================
 def extract_branch_id(branch_text):
-    # Branch looks like: "... (B0042)"
+    """Extract branch_id like 'B0042' from text like '... (B0042)'"""
     if branch_text is None:
         return None
     m = re.search(r"\((B\d+)\)", str(branch_text))
@@ -116,6 +116,7 @@ def extract_branch_id(branch_text):
 
 
 def compute_severity(df: pd.DataFrame) -> pd.DataFrame:
+    """Add severity column based on Reason Fraud"""
     if "Reason Fraud" in df.columns:
         r = df["Reason Fraud"].astype(str)
         df["severity"] = "LOW"
@@ -127,7 +128,7 @@ def compute_severity(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
-# Load data (robust)
+# Load data (FIXED bindparam)
 # =========================
 @st.cache_data(ttl=30)
 def load_fraud_data(time_range: str, fraud_types: tuple, host: str, port: str, db: str, user: str, password: str):
@@ -141,32 +142,27 @@ def load_fraud_data(time_range: str, fraud_types: tuple, host: str, port: str, d
     }
     time_filter = time_filters.get(time_range, "1=1")
 
-    params = {}
-
-    # ---- Fraud filter (SAFE list via expanding) ----
+    # ---- Fraud filter (FIXED: use tuple in SQL) ----
     fraud_filter_sql = ""
     if fraud_types and "All" not in fraud_types:
-        params["fraud_list"] = list(fraud_types)
-        fraud_filter_sql = " AND f.fraudtype IN :fraud_list "
-    else:
-        fraud_filter_sql = ""
+        # Convert tuple to SQL-safe string
+        fraud_list_sql = "(" + ",".join(f"'{ft}'" for ft in fraud_types) + ")"
+        fraud_filter_sql = f" AND f.fraudtype IN {fraud_list_sql} "
 
     sql_fraud = text(
         f"""
         SELECT f.*
-        FROM tlekdw_fraud.fraudcaseresult f
+        FROM tlekdw_fraud.fraudcasesresult f
         WHERE {time_filter}
         {fraud_filter_sql}
         ORDER BY f."timeInvestigation" DESC
         LIMIT 2000;
         """
     )
-    if "fraud_list" in params:
-        sql_fraud = sql_fraud.bindparams(bindparam("fraud_list", expanding=True))
 
     # 1) Load fraud
     with engine.connect() as conn:
-        fraud_df = pd.read_sql(sql_fraud, conn, params=params)
+        fraud_df = pd.read_sql(sql_fraud, conn)
 
     if fraud_df.empty:
         return fraud_df
@@ -179,10 +175,11 @@ def load_fraud_data(time_range: str, fraud_types: tuple, host: str, port: str, d
 
     branch_ids = fraud_df["branch_id"].dropna().astype(str).unique().tolist()
 
-    # 3) Pull dim_branch for only involved branch_id (SAFE expanding)
+    # 3) Pull dim_branch (FIXED: use tuple in SQL)
     if branch_ids:
+        branch_ids_sql = "(" + ",".join(f"'{bid}'" for bid in branch_ids) + ")"
         sql_branch = text(
-            """
+            f"""
             SELECT
                 branch_id,
                 branch_name,
@@ -191,12 +188,12 @@ def load_fraud_data(time_range: str, fraud_types: tuple, host: str, port: str, d
                 longitude,
                 map_url
             FROM tlekdw_common.dim_branch
-            WHERE branch_id IN :branch_ids
+            WHERE branch_id IN {branch_ids_sql}
             """
-        ).bindparams(bindparam("branch_ids", expanding=True))
+        )
 
         with engine.connect() as conn:
-            branch_df = pd.read_sql(sql_branch, conn, params={"branch_ids": branch_ids})
+            branch_df = pd.read_sql(sql_branch, conn)
 
         out = fraud_df.merge(branch_df, on="branch_id", how="left")
     else:
@@ -262,7 +259,7 @@ st.subheader("🗺️ Fraud Map (click point to drill down)")
 map_df = df.dropna(subset=["latitude", "longitude"]).copy()
 
 if map_df.empty:
-    st.warning("⚠️ ไม่เจอ latitude/longitude หลัง merge dim_branch (เช็ค dim_branch ว่ามีพิกัดครบไหม)")
+    st.warning("⚠️ No latitude/longitude data found. Check dim_branch table.")
     st.dataframe(
         df[[c for c in ["Branch", "branch_id", "branch_name", "province"] if c in df.columns]].head(100),
         use_container_width=True
@@ -319,20 +316,20 @@ st.divider()
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Fraud by Type")
+    st.subheader("📊 Fraud by Type")
     if "fraudtype" in df.columns:
         st.plotly_chart(px.pie(df, names="fraudtype", hole=0.4), use_container_width=True)
     else:
-        st.info("ไม่มีคอลัมน์ fraudtype")
+        st.info("No fraudtype column")
 
 with col2:
-    st.subheader("Fraud by Province")
+    st.subheader("📊 Fraud by Province")
     if "province" in df.columns:
         vc = df["province"].astype(str).value_counts().head(10).reset_index()
         vc.columns = ["province", "count"]
         st.plotly_chart(px.bar(vc, x="count", y="province", orientation="h"), use_container_width=True)
     else:
-        st.info("ไม่มีคอลัมน์ province")
+        st.info("No province column")
 
 st.divider()
 
