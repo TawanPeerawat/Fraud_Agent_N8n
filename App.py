@@ -1,7 +1,7 @@
 """
 🛡️ Fraud Detection Dashboard (with Interactive Map)
 - Source: tlekdw_fraud.fraudcaseresult
-- Branch master: tlekdw_common.dim_branch
+- Branch master: tlekdw_operation.dim_branch
 - Streamlit Cloud friendly (Python 3.13): SQLAlchemy + psycopg3
 - Fixed: bindparam expanding issue
 """
@@ -205,7 +205,7 @@ def load_fraud_data(time_range: str, fraud_types: tuple, host: str, port: str, d
                 latitude,
                 longitude,
                 map_url
-            FROM tlekdw_common.dim_branch
+            FROM tlekdw_operation.dim_branch
             WHERE branch_id IN {branch_ids_sql}
             """
         )
