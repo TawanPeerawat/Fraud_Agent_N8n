@@ -170,7 +170,7 @@ def load_fraud_data(time_range: str, fraud_types: tuple, host: str, port: str, d
     sql_fraud = text(
         f"""
         SELECT f.*
-        FROM tlekdw_fraud.fraudcasesresult f
+        FROM tlekdw_fraud.fraudcaseresult f
         WHERE {time_filter}
         {fraud_filter_sql}
         ORDER BY f."timeInvestigation" DESC
