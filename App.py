@@ -99,9 +99,27 @@ st.markdown('<div class="main-header">🛡️ Fraud Detection Dashboard</div>', 
 # =========================
 @st.cache_resource
 def get_engine(host: str, port: str, db: str, user: str, password: str):
-    pw = quote_plus(password)
-    url = f"postgresql+psycopg://{user}:{pw}@{host}:{int(port)}/{db}"
-    return create_engine(url, pool_pre_ping=True)
+    try:
+        pw = quote_plus(password)
+        url = f"postgresql+psycopg://{user}:{pw}@{host}:{int(port)}/{db}"
+        engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
+        
+        # Test connection
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        
+        return engine
+    except Exception as e:
+        st.error(f"❌ Database connection failed!")
+        st.error(f"Host: {host}:{port}")
+        st.error(f"Database: {db}")
+        st.error(f"User: {user}")
+        st.error(f"Error: {str(e)}")
+        st.info("💡 Possible solutions:")
+        st.info("1. Check if database allows external connections")
+        st.info("2. Add Streamlit Cloud IP to firewall whitelist")
+        st.info("3. Verify password (current has space: 'pass is2025')")
+        st.stop()
 
 
 # =========================
